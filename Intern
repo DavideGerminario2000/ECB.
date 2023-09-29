@@ -1,0 +1,391 @@
+#UIP PROJECT
+
+# Load necessary libraries
+library(readxl)
+library(stargazer)
+library(zoo)
+library(ggplot2)
+
+
+# Assuming spot_rate and forward_rate are your data frames
+# and Date is the first column, followed by rates for different currencies
+ln_spot_rate <- log(spot_rate[, -1])
+ln_forward_rate <- log(forward_rate[, -1])
+
+View(ln_spot_rate)
+View(ln_forward_rate)
+
+# Compute excess currency return: ln(Spot(t+1)) - ln(Forward(t))
+data_excess_return <- ln_spot_rate[-1, ] - ln_forward_rate[-nrow(ln_forward_rate), ]
+
+data_interest_diff <- ln_forward_rate[-nrow(ln_forward_rate), ] - ln_spot_rate[-nrow(ln_spot_rate), ]
+
+# Currency names
+currency_names <- colnames(data_excess_return)
+
+# Initialize empty lists to store regression models, coefficients, R-squared values, and p-values
+regression_models <- list()
+coefficients <- numeric()
+rsquared <- numeric()
+p_values <- numeric()
+
+# Run UIP regressions for each currency
+for(currency in currency_names) {
+  # Exclude NA values
+  df <- na.omit(data.frame(y = data_excess_return[[currency]], x = data_interest_diff[[currency]]))
+  
+  # Fit model
+  regression_models[[currency]] <- lm(y ~ x, data = df)
+  
+  # Extract coefficients, R-squared values, and p-values
+  coefficients <- c(coefficients, coef(regression_models[[currency]])[2])
+  rsquared <- c(rsquared, summary(regression_models[[currency]])$r.squared)
+  p_values <- c(p_values, summary(regression_models[[currency]])$coefficients[2, "Pr(>|t|)"])
+}
+
+# Format results
+coefficients <- sprintf("%.6f", coefficients)
+rsquared <- sprintf("%.6f", rsquared)
+
+# Determine significance levels (p-values)
+significance_levels <- ifelse(p_values < 0.01, "*",
+                              ifelse(p_values < 0.05, "**",
+                                     ifelse(p_values < 0.1, "*",
+                                            "")))
+
+# Create data frame to summarize results
+result_df <- data.frame("Currency" = currency_names,
+                        "Coefficient beta 1" = paste0(coefficients, significance_levels),
+                        "R Squared" = rsquared)
+
+# Initialize list to store average beta coefficients
+window_size <- 60  # 5 years, assuming monthly data
+n <- nrow(data_excess_return)
+avg_beta <- numeric(n - window_size + 1)
+
+
+# Loop through each time window and calculate average beta coefficients
+for(i in seq_len(n - window_size + 1)) {
+  beta_values <- numeric()
+  
+  for(currency in currency_names) {
+    y <- as.vector(data_excess_return[i:(i + window_size - 1), currency, drop = TRUE])
+    x <- as.vector(data_interest_diff[i:(i + window_size - 1), currency, drop = TRUE])
+    
+    df <- na.omit(data.frame(y = y, x = x))
+    
+    if(nrow(df) == 0) {
+      cat("No non-NA cases for currency", currency, "in window starting at", i, "\n")
+      next
+    }
+    
+    model <- lm(y ~ x, data = df)
+    beta_values <- c(beta_values, coef(model)[2])
+  }
+  
+  if(length(beta_values) > 0) {
+    avg_beta[i] <- mean(beta_values, na.rm = TRUE)
+  } else {
+    cat("No betas calculated for window starting at", i, "\n")
+    avg_beta[i] <- NA
+  }
+}
+
+
+# Create a time index for plotting
+time_index <- seq_len(n - window_size + 1)
+
+# Convert to a data frame for plotting
+avg_beta_df <- data.frame(Time = time_index, Avg_Beta = avg_beta)
+
+# Plot the average beta coefficient over time
+ggplot(avg_beta_df, aes(x = Time, y = Avg_Beta)) +
+  geom_line() +
+  geom_smooth(method = 'loess') +
+  ggtitle("Time-varying UIP Beta Coefficients") +
+  xlab("Time") +
+  ylab("Average Beta")
+
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+# Regional Integration Analysis
+
+---
+title: "ecowas 2"
+format: html
+---
+
+## Library 
+
+{r}
+library(haven)
+library(tidyverse)
+library(here) #easy file referencing, root is set at project root
+library(fixest) # perform estimations with multiple fixed-effects
+library(flextable) # Output tables to word
+library(huxtable) # Outupt tables
+library(texreg) #for huxtablereg function
+library(data.table)
+library(lubridate)
+library(stargazer)
+
+
+## Data preparation 
+
+{r}
+G<- readRDS("C:/Users/ricca/OneDrive/Desktop/EGEI Master/2nd semester/EEI and regional analysis/RIA/Project/Gravity_V202211.rds")
+
+{r}
+new2G <- G[c( "year", "country_id_o", "country_id_d", "tradeflow_baci", "dist", "contig", "comlang_off", "sibling_ever", "empire", "rta_type", "fta_wto", "fta_wto_raw", "comrelig")]
+new2G <- new2G %>% 
+  rename("exporter" = "country_id_o",
+         "importer" = "country_id_d",
+         "cntg" = "contig",
+         "lang" = "comlang_off",
+         "clny" = "sibling_ever",
+         "trade" = "tradeflow_baci",
+         "comrelig" = "comrelig",
+         "fta" = "fta_wto_raw")
+
+#Change NA to zero
+new2G[is.na(new2G)] <- 0
+#lag missing!
+
+
+#select year
+new2G_app1 = new2G %>%
+  filter(year %in% seq(1980, 2020, 4))
+
+#We also need to construct symmetric pair ID-variables
+new2G_app1 = new2G_app1 %>%
+  mutate(pair=paste(pmin(exporter,importer),pmax(exporter,importer),sep = "_")) %>% 
+  group_by(pair) %>%
+  mutate(pair_id = cur_group_id())
+#Construct exporter output and importer expenditure
+new2G_app1 = new2G_app1 %>%
+  group_by(exporter,year) %>%
+  mutate(Y_it = sum(trade)) %>%
+  group_by(importer,year) %>%
+  mutate(E_jt = sum(trade))
+
+#Calculate the logs of necessary variables
+new2G_app1 = new2G_app1 %>%
+  mutate(across(c(trade,Y_it,E_jt,dist),~log(.x),.names="ln_{.col}"))
+#proxy for MR
+new2G_app1 = new2G_app1 %>%
+  group_by(year) %>%
+  mutate(Y_t = sum(Y_it), E_t = sum(E_jt)) %>%
+  group_by(exporter, year) %>%
+  mutate(remoteness_exp = sum(dist / (E_jt / E_t))) %>%
+  group_by(importer, year) %>%
+  mutate(remoteness_imp = sum(dist / (Y_it / Y_t))) %>%
+  mutate(ln_remoteness_exp = log(remoteness_exp),
+         ln_remoteness_imp = log(remoteness_imp))
+
+#fixed effect
+new2G_app1 = new2G_app1 %>%
+  unite("fe_exp_year",c(exporter,year),sep="_",remove=FALSE) %>%
+  unite("fe_imp_year",c(importer,year),sep="_",remove=FALSE)
+
+# Specify country-specific intra-national trade dummies
+new2G_app1 = new2G_app1 %>%
+  mutate(D_trade_ii = ifelse(exporter==importer,exporter,"international"))
+
+#RTA ECOWAS SIGNED IN 1990
+new2G_app1 <- new2G_app1 %>%
+  mutate(ecowas = ifelse(year >= 1990 & exporter %in% c("BEN", "BFA", "CIV", "CPV", "GHA","GIN", "GMB", "GNB", "LBR", "MLI", "NER", "NGA", "SEN", "SLE", "TGO") & importer %in% c("BEN", "BFA", "CIV", "CPV", "GHA","GIN", "GMB", "GNB", "LBR", "MLI", "NER", "NGA", "SEN", "SLE", "TGO"), 1, 0))
+
+#Create a dummy variable fta that have value of 1 if 2 country have a trade agreement and 0 otherwise (use column rta)
+new2G_app1 <- new2G_app1 %>%
+  mutate(fta2 = ifelse(fta == 1 & ecowas == 0, 1, 0))
+
+#Common currency CFA 
+new2G_app1 <- new2G_app1 %>%
+  mutate(comcurr = ifelse(year >= 1945 & exporter %in% c("BEN", "BFA", "CIV", "GNB", "MLI", "NER", "SEN", "TGO", "CMR", "CAF", "TCD", "COG", "GNQ", "GAB") & importer %in% c("BEN", "BFA", "CIV", "GNB", "MLI", "NER", "SEN", "TGO", "CMR", "CAF", "TCD", "COG", "GNQ", "GAB"), 1, 0))
+
+#Wameu
+new2G_app1 <- new2G_app1 %>%
+  mutate(wameu = ifelse(year >= 1945 & exporter %in% c("BEN", "BFA", "CIV", "GNB", "MLI", "NER", "SEN", "TGO") & importer %in% c("BEN", "BFA", "CIV", "GNB", "MLI", "NER", "SEN", "TGO"), 1, 0))
+
+
+
+
+## Result only Ecowas 
+
+{r}
+#OLS estimation
+ecowas_ols <- feols(ln_trade ~ ln_dist + cntg + lang + clny + comrelig + ecowas |
+                  fe_exp_year + fe_imp_year,
+                data = new2G_app1 %>%
+                  filter(trade > 0 & exporter != importer),
+                vcov = cluster ~ pair_id)
+#Summary OLS
+#summary(ecowas_ols)
+#PPLM estimation
+ecowas_poisson <- fepois(trade ~ ln_dist + cntg + lang + clny + comrelig + ecowas |
+                       fe_exp_year + fe_imp_year,
+                     data = new2G_app1 %>%
+                       filter(exporter != importer),
+                     vcov = cluster ~ pair_id)
+#Summary PPLM
+#summary(ecowas_poisson)
+#Allowing for trade-diversion from domestic sales - estimation
+ecowas_poisson_intra <- fepois(trade ~ ln_dist + cntg + lang + clny + comrelig + ecowas |
+                             fe_exp_year + fe_imp_year + D_trade_ii,
+                           data = new2G_app1,
+                           vcov = cluster ~ pair_id)
+#Summary Trade Diversion
+#summary(ecowas_poisson_intra)
+#Addressing potential endogeneity of RTAs - Estimation
+#we exclude fe_exp_year because of multicollinearity
+ecowas_endo <- fepois(trade ~ ecowas |
+                    fe_imp_year + pair_id,
+                  data = new2G_app1,
+                  vcov = cluster ~ pair_id)
+#summary
+#summary(ecowas_endo)
+
+question_1_huxtable <- huxtablereg(list("(1) OLS" = ecowas_ols, "(2) PPLM" = ecowas_poisson, "(3) Trade diversion" = ecowas_poisson_intra, "(4) Endogeneity of Ecowas" = ecowas_endo ),
+                                    custom.coef.map = list("ln_dist" = "Distance",
+                                   "cntg" = "Contiguity",
+                                   "lang" = "Language",
+                                   "clny" = "Colony ties",
+                                   "comrelig" = "comrelig",
+                                   "ecowas" = "Ecowas"),
+            single.row = TRUE) %>%
+  set_align(everywhere,-1,"center") %>%
+  set_top_border(c(1,2),everywhere,1) %>%
+  set_bottom_border(8,-1,0.5) %>%
+  set_tb_padding(0) %>%
+  set_col_width(c(0.5,rep(0.5/2,2))) %>%
+  set_caption("First model Specification") %>%
+  add_footnote("Note: Standard errors are reported in parentheses. *p<0.1; **p<0.05; ***p<0.01 \n fe_exp_year exclude in last regression because of multicollinearity" , border=1) %>%
+  set_label("question_1_huxtable")
+question_1_huxtable
+
+
+## Result Ecowas and other FTA
+
+{r}
+#OLS estimation including RTA ROW
+rta_ols <- feols(ln_trade ~ ln_dist + cntg + lang + clny + comrelig + ecowas + fta2  |
+                  fe_exp_year + fe_imp_year,
+                data = new2G_app1 %>%
+                  filter(trade > 0 & exporter != importer),
+                vcov = cluster ~ pair_id)
+#Summary OLS
+#summary(rta_ols)
+#PPLM estimation
+rta_poisson <- fepois(trade ~ ln_dist + cntg + lang + clny +comrelig + ecowas + fta2 |
+                       fe_exp_year + fe_imp_year,
+                     data = new2G_app1 %>%
+                       filter(exporter != importer),
+                     vcov = cluster ~ pair_id)
+#Summary PPLM
+#summary(rta_poisson)
+#Allowing for trade-diversion from domestic sales - estimation
+rta_poisson_intra <- fepois(trade ~ ln_dist + cntg + lang + clny + comrelig + ecowas + fta2|
+                             fe_exp_year + fe_imp_year + D_trade_ii,
+                           data = new2G_app1,
+                           vcov = cluster ~ pair_id)
+#Summary Trade Diversion
+#summary(rta_poisson_intra)
+#Addressing potential endogeneity of RTAs - Estimation
+rta_endo <- fepois(trade ~ fta2 |
+                   fe_exp_year  + fe_imp_year + pair_id,
+                  data = new2G_app1,
+                  vcov = cluster ~ pair_id)
+#summary
+#summary(rta_endo)
+
+question_2_huxtable <- huxtablereg(list("(1) OLS" = rta_ols, "(2) PPLM" = rta_poisson, "(3) Trade diversion" = rta_poisson_intra, "(4) Endogeneity of rta" = rta_endo ),
+ custom.coef.map = list("ln_dist" = "Distance",
+                                   "cntg" = "Contiguity",
+                                   "lang" = "Language",
+                                   "clny" = "Colony ties",
+                                   "comrelig" = "comrelig",
+                                   "ecowas" = "Ecowas",
+                                    "fta2" = "RTA excluding Ecowas" ), 
+            single.row = TRUE) %>%
+  set_align(everywhere,-1,"center") %>%
+  set_top_border(c(1,2),everywhere,1) %>%
+  set_bottom_border(8,-1,0.5) %>%
+  set_tb_padding(0) %>%
+  set_col_width(c(0.5,rep(0.5/2,2))) %>%
+  set_caption("Table 2") %>%
+  add_footnote("Note: Standard errors are reported in parentheses. *p<0.1; **p<0.05; ***p<0.01 \n fe_exp_year exclude in last regression because of multicollinearity" , border=1) %>%
+  set_label("question_2_huxtable")
+question_2_huxtable
+
+
+## Result with Common currency
+
+{r}
+#OLS estimation
+comcurr_ols = feols(ln_trade ~ ln_dist + cntg + lang + clny + comrelig + ecowas + comcurr + fta2|
+                  fe_exp_year + fe_imp_year,
+                data = new2G_app1 %>%
+                  filter(trade > 0 & exporter != importer),
+                vcov = cluster ~ pair_id)
+#Summary OLS
+#summary(comcurr_ols)
+
+#PPLM estimation
+comcurr_poisson = fepois(trade ~ ln_dist + cntg + lang + clny + comrelig + ecowas + comcurr + fta2|
+                       fe_exp_year + fe_imp_year,
+                     data = new2G_app1 %>%
+                       filter(exporter != importer),
+                     vcov = cluster ~ pair_id)
+#Summary PPLM
+#summary(comcurr_poisson)
+
+#Allowing for trade-diversion from domestic sales - estimation
+comcurr_poisson_intra = fepois(trade ~ ln_dist + cntg + lang + clny + comrelig + ecowas + comcurr + fta2|
+                             fe_exp_year + fe_imp_year + D_trade_ii,
+                           data = new2G_app1,
+                           vcov = cluster ~ pair_id)
+#Summary Trade Diversion
+#summary(comcurr_poisson_intra)
+
+question_3_huxtable <- huxtablereg(list("(1) OLS" = comcurr_ols, "(2) PPLM" = comcurr_poisson, "(3) Trade diversion" = comcurr_poisson_intra),
+                                   custom.coef.map = list("ln_dist" = "Distance",
+                                   "cntg" = "Contiguity",
+                                   "lang" = "Language",
+                                   "clny" = "Colony ties",
+                                   "comrelig" = "comrelig",
+                                   "ecowas" = "Ecowas",
+                                    "fta2" = "RTA excluding Ecowas",
+                                   "comcurr" = "Common Currency (CFA)"), 
+            single.row = TRUE) %>%
+  set_align(everywhere,-1,"center") %>%
+  set_top_border(c(1,2),everywhere,1) %>%
+  set_bottom_border(9,-1,0.5) %>%
+  set_tb_padding(0) %>%
+  set_col_width(c(0.5,rep(0.5/2,2))) %>%
+  set_caption("Table 3") %>%
+  add_footnote("Note: Standard errors are reported in parentheses. *p<0.1; **p<0.05; ***p<0.01 \n fe_exp_year exclude in last regression because of multicollinearity" , border=1) %>%
+  set_label("question_3_huxtable")
+question_3_huxtable
+
+
+## Comparison of result
+
+{r}
+question_4_huxtable <- huxtablereg(list("(1) " = ecowas_poisson_intra, "(2)" = rta_poisson_intra, "(3)" = comcurr_poisson_intra),
+                                   custom.coef.map = list("ln_dist" = "Distance",
+                                   "cntg" = "Contiguity",
+                                   "lang" = "Language",
+                                   "clny" = "Colony ties",
+                                   "comrelig" = "comrelig",
+                                   "ecowas" = "Ecowas",
+                                    "fta2" = "RTA excluding Ecowas",
+                                   "comcurr" = "Common Currency (CFA)"), 
+            single.row = TRUE) %>%
+  set_align(everywhere,-1,"center") %>%
+  set_top_border(c(1,2),everywhere,1) %>%
+  set_bottom_border(9,-1,0.5) %>%
+  set_tb_padding(0) %>%
+  set_col_width(c(0.5,rep(0.5/2,2))) %>%
+  set_caption("Table 4: PPML specifcation for different model") %>%
+  add_footnote("Note: Standard errors are reported in parentheses. *p<0.1; **p<0.05; ***p<0.01 \n fe_exp_year exclude in last regression because of multicollinearity" , border=1) %>%
+  set_label("question_4_huxtable")
+question_4_huxtable
